@@ -20,3 +20,13 @@
 ## Entry Point & Setup
 - [x] Create `main.py` — application entry point
 - [x] Create `install.bat` — one-click dependency installer for Windows
+
+## New Features
+- [x] Add search field to OCR Reader tab GUI
+- [x] Live-highlight matched text in OCR output as user types in search field
+- [x] Add live mouse position tracker to status bar
+- [x] Add coordinate picker — click anywhere to capture X/Y and copy JSON snippet to clipboard
+- [x] Add Example Scripts button to Automation Runner tab
+- [x] Build example scripts dialog — browsable list with JSON preview and "Load into Editor" action
+- [x] Add looping read text with configurable interval, Start/Stop buttons to OCR Reader tab
+- [x] Show date and time timestamp on each OCR read result

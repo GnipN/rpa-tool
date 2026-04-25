@@ -22,17 +22,16 @@ class Region:
 
 
 class ScreenCapture:
-    def __init__(self) -> None:
-        self._sct = mss.mss()
-
     def capture_region(self, region: Region) -> Image.Image:
-        raw = self._sct.grab(region.to_mss_monitor())
-        return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+        with mss.mss() as sct:
+            raw = sct.grab(region.to_mss_monitor())
+            return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
 
     def capture_fullscreen(self, monitor_index: int = 1) -> Image.Image:
-        monitor = self._sct.monitors[monitor_index]
-        raw = self._sct.grab(monitor)
-        return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+        with mss.mss() as sct:
+            monitor = sct.monitors[monitor_index]
+            raw = sct.grab(monitor)
+            return Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
 
     def save(self, image: Image.Image, path: str) -> None:
         image.save(path)
