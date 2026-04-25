@@ -1,0 +1,60 @@
+{
+  "name": "Example — Open Notepad and type a message",
+  "description": "Launches Notepad via Run dialog, waits for it to appear, then types a message and saves.",
+  "steps": [
+    {
+      "type": "hotkey",
+      "keys": ["win", "r"],
+      "label": "Open Run dialog"
+    },
+    {
+      "type": "wait",
+      "seconds": 0.8,
+      "label": "Wait for Run dialog to appear"
+    },
+    {
+      "type": "type",
+      "text": "notepad",
+      "label": "Type 'notepad' in Run dialog"
+    },
+    {
+      "type": "press",
+      "key": "enter",
+      "label": "Press Enter to open Notepad"
+    },
+    {
+      "type": "wait",
+      "seconds": 1.5,
+      "label": "Wait for Notepad to load"
+    },
+    {
+      "type": "ocr_wait",
+      "region": { "x": 0, "y": 0, "width": 1920, "height": 60 },
+      "text": "Notepad",
+      "timeout": 10,
+      "interval": 0.5,
+      "label": "Wait until Notepad title bar is visible"
+    },
+    {
+      "type": "type",
+      "text": "Hello from RPA Tool!\nThis text was typed automatically.",
+      "unicode": true,
+      "label": "Type message into Notepad"
+    },
+    {
+      "type": "hotkey",
+      "keys": ["ctrl", "s"],
+      "label": "Save the file"
+    },
+    {
+      "type": "wait",
+      "seconds": 0.5,
+      "label": "Wait for Save dialog"
+    },
+    {
+      "type": "press",
+      "key": "escape",
+      "label": "Dismiss Save dialog (cancel — demo only)"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+# Screen capture
+mss==9.0.1
+Pillow==12.2.0
+
+# OCR
+easyocr==1.7.1
+
+# Mouse & keyboard control
+pyautogui==0.9.54
+pynput==1.7.7
+
+# GUI — tkinter is built into Python, no extra install needed
+
+# Utilities
+numpy==1.26.4
