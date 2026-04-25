@@ -30,3 +30,7 @@
 - [x] Build example scripts dialog — browsable list with JSON preview and "Load into Editor" action
 - [x] Add looping read text with configurable interval, Start/Stop buttons to OCR Reader tab
 - [x] Show date and time timestamp on each OCR read result
+- [x] Create src/triggers.py — TriggerRule dataclass and TriggerStore with match/fire/persist logic
+- [x] Add Triggers tab — rule manager (treeview), Add/Edit/Delete/Toggle, trigger log, rule persistence
+- [x] Add TriggerRuleDialog — name, trigger text, match mode, cooldown, script editor with Examples picker
+- [x] Wire OCR loop → TriggerStore.evaluate on each read; cooldown blocks re-fire until script completes

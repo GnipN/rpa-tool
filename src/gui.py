@@ -1,6 +1,8 @@
 from __future__ import annotations
 import json
 import threading
+import time
+import uuid
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 from pathlib import Path
@@ -10,6 +12,7 @@ import pyautogui
 from .capture import ScreenCapture, Region
 from .ocr import OCREngine
 from .runner import AutomationRunner
+from .triggers import TriggerRule, TriggerStore
 
 
 class RegionSelector(tk.Toplevel):
@@ -59,7 +62,7 @@ class RegionSelector(tk.Toplevel):
 
 
 class OCRPanel(ttk.Frame):
-    def __init__(self, master):
+    def __init__(self, master, on_loop_result=None):
         super().__init__(master, padding=8)
         self._capture = ScreenCapture()  # stateless; new mss ctx per call
         self._ocr = OCREngine()
@@ -68,6 +71,7 @@ class OCRPanel(ttk.Frame):
         self._reading = False
         self._loop_after_id = None
         self._loop_history: list[tuple[str, str]] = []
+        self._on_loop_result = on_loop_result
         self._build_ui()
 
     def _build_ui(self):
@@ -204,6 +208,8 @@ class OCRPanel(ttk.Frame):
             if len(self._loop_history) > 25:
                 self._loop_history = self._loop_history[:25]
             self._redraw_loop_output()
+            if self._on_loop_result:
+                self._on_loop_result(text)
             try:
                 interval_ms = max(100, int(float(self._interval_var.get()) * 1000))
             except ValueError:
@@ -515,6 +521,293 @@ class RunnerPanel(ttk.Frame):
         self._stop_btn.config(state="disabled")
 
 
+class TriggerRuleDialog(tk.Toplevel):
+    """Modal dialog to create or edit a single trigger rule."""
+
+    def __init__(self, master, rule: TriggerRule | None, callback):
+        super().__init__(master)
+        self.title("Edit Rule" if rule else "Add Rule")
+        self.geometry("660x560")
+        self.minsize(520, 460)
+        self.resizable(True, True)
+        self.grab_set()
+        self._rule = rule
+        self._callback = callback
+        self._build_ui()
+        if rule:
+            self._populate(rule)
+
+    def _build_ui(self):
+        form = ttk.Frame(self, padding=10)
+        form.pack(fill="both", expand=True)
+
+        for label, attr, widget_fn in [
+            ("Name:", "_name_var", lambda r: ttk.Entry(r, textvariable=self._name_var)),
+            ("Trigger text:", "_text_var", lambda r: ttk.Entry(r, textvariable=self._text_var)),
+        ]:
+            row = ttk.Frame(form)
+            row.pack(fill="x", pady=3)
+            ttk.Label(row, text=label, width=16, anchor="w").pack(side="left")
+            setattr(self, attr, tk.StringVar())
+            widget_fn(row).pack(side="left", fill="x", expand=True)
+
+        row = ttk.Frame(form)
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text="Match mode:", width=16, anchor="w").pack(side="left")
+        self._mode_var = tk.StringVar(value="contains")
+        ttk.Combobox(row, textvariable=self._mode_var,
+                     values=["contains", "exact", "regex"],
+                     state="readonly", width=12).pack(side="left")
+
+        row = ttk.Frame(form)
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text="Cooldown:", width=16, anchor="w").pack(side="left")
+        self._cooldown_var = tk.StringVar(value="0")
+        ttk.Spinbox(row, from_=0, to=3600, increment=1,
+                    textvariable=self._cooldown_var, width=8).pack(side="left")
+        ttk.Label(row, text="sec after script completes (0 = fire again as soon as done)").pack(
+            side="left", padx=(6, 0))
+
+        row = ttk.Frame(form)
+        row.pack(fill="x", pady=3)
+        self._enabled_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(row, text="Enabled", variable=self._enabled_var).pack(side="left")
+
+        script_frame = ttk.LabelFrame(form, text="Script (JSON)", padding=4)
+        script_frame.pack(fill="both", expand=True, pady=(8, 0))
+
+        btn_row = ttk.Frame(script_frame)
+        btn_row.pack(fill="x", pady=(0, 4))
+        ttk.Button(btn_row, text="Load from file…", command=self._load_file).pack(side="left", padx=(0, 4))
+        ttk.Button(btn_row, text="Pick Example…", command=self._pick_example).pack(side="left")
+
+        self._script_editor = scrolledtext.ScrolledText(script_frame, wrap="none",
+                                                        font=("Consolas", 9), height=12)
+        self._script_editor.pack(fill="both", expand=True)
+
+        btn_row = ttk.Frame(self)
+        btn_row.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(btn_row, text="OK", command=self._ok, width=10).pack(side="left")
+        ttk.Button(btn_row, text="Cancel", command=self.destroy, width=10).pack(side="right")
+
+    def _populate(self, rule: TriggerRule):
+        self._name_var.set(rule.name)
+        self._text_var.set(rule.trigger_text)
+        self._mode_var.set(rule.match_mode)
+        self._cooldown_var.set(str(int(rule.cooldown)))
+        self._enabled_var.set(rule.enabled)
+        self._script_editor.delete("1.0", "end")
+        self._script_editor.insert("end", json.dumps(rule.script, indent=2))
+
+    def _load_file(self):
+        path = filedialog.askopenfilename(title="Open Script",
+                                          filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")])
+        if path:
+            self._script_editor.delete("1.0", "end")
+            self._script_editor.insert("end", Path(path).read_text(encoding="utf-8"))
+
+    def _pick_example(self):
+        def load(json_text):
+            self._script_editor.delete("1.0", "end")
+            self._script_editor.insert("end", json_text)
+        ExampleScriptsDialog(self, load)
+
+    def _ok(self):
+        name = self._name_var.get().strip()
+        trigger_text = self._text_var.get().strip()
+        if not name:
+            messagebox.showerror("Validation", "Name is required.", parent=self)
+            return
+        if not trigger_text:
+            messagebox.showerror("Validation", "Trigger text is required.", parent=self)
+            return
+        try:
+            script = json.loads(self._script_editor.get("1.0", "end"))
+        except json.JSONDecodeError as exc:
+            messagebox.showerror("Invalid JSON", str(exc), parent=self)
+            return
+        try:
+            cooldown = max(0.0, float(self._cooldown_var.get()))
+        except ValueError:
+            cooldown = 0.0
+
+        rule = TriggerRule(
+            id=self._rule.id if self._rule else str(uuid.uuid4()),
+            name=name,
+            trigger_text=trigger_text,
+            match_mode=self._mode_var.get(),
+            script=script,
+            cooldown=cooldown,
+            enabled=self._enabled_var.get(),
+        )
+        # Preserve runtime state when editing
+        if self._rule:
+            rule.running = self._rule.running
+            rule.last_completed = self._rule.last_completed
+        self._callback(rule)
+        self.destroy()
+
+
+class TriggersPanel(ttk.Frame):
+    def __init__(self, master, store: TriggerStore):
+        super().__init__(master, padding=8)
+        self._store = store
+        self._build_ui()
+        self._refresh_tree()
+        self._poll_status()
+
+    def _build_ui(self):
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill="x", pady=(0, 4))
+        ttk.Button(toolbar, text="Add Rule", command=self._add).pack(side="left", padx=(0, 2))
+        ttk.Button(toolbar, text="Edit Rule", command=self._edit).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="Delete Rule", command=self._delete).pack(side="left", padx=2)
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Button(toolbar, text="Toggle Enable", command=self._toggle).pack(side="left")
+        ttk.Button(toolbar, text="Save", command=self._store.save).pack(side="right")
+
+        pane = ttk.PanedWindow(self, orient="vertical")
+        pane.pack(fill="both", expand=True)
+
+        tree_frame = ttk.LabelFrame(pane, text="Rules", padding=4)
+        cols = ("enabled", "name", "match", "text", "cooldown", "status")
+        self._tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                                  selectmode="browse", height=8)
+        self._tree.heading("enabled", text="On")
+        self._tree.heading("name", text="Name")
+        self._tree.heading("match", text="Match")
+        self._tree.heading("text", text="Trigger Text")
+        self._tree.heading("cooldown", text="Cooldown")
+        self._tree.heading("status", text="Status")
+        self._tree.column("enabled",   width=35,  anchor="center", stretch=False)
+        self._tree.column("name",      width=160)
+        self._tree.column("match",     width=80,  anchor="center", stretch=False)
+        self._tree.column("text",      width=220)
+        self._tree.column("cooldown",  width=75,  anchor="center", stretch=False)
+        self._tree.column("status",    width=115, anchor="center", stretch=False)
+        self._tree.tag_configure("disabled", foreground="#999999")
+        self._tree.tag_configure("running",  background="#fff3cd")
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self._tree.pack(fill="both", expand=True)
+        self._tree.bind("<Double-1>", lambda _: self._edit())
+        pane.add(tree_frame, weight=2)
+
+        log_frame = ttk.LabelFrame(pane, text="Trigger Log", padding=4)
+        log_tb = ttk.Frame(log_frame)
+        log_tb.pack(fill="x", pady=(0, 4))
+        ttk.Button(log_tb, text="Clear", command=self._clear_log).pack(side="right")
+        self._log = scrolledtext.ScrolledText(log_frame, wrap="word", font=("Consolas", 9),
+                                              state="disabled", height=8)
+        self._log.pack(fill="both", expand=True)
+        pane.add(log_frame, weight=1)
+
+    # ── log ────────────────────────────────────────────────────────────────────
+
+    def append_log(self, msg: str):
+        """Thread-safe: marshals to main thread via after()."""
+        self.after(0, lambda: self._do_append_log(msg))
+
+    def _do_append_log(self, msg: str):
+        self._log.config(state="normal")
+        self._log.insert("end", msg + "\n")
+        self._log.see("end")
+        self._log.config(state="disabled")
+
+    def _clear_log(self):
+        self._log.config(state="normal")
+        self._log.delete("1.0", "end")
+        self._log.config(state="disabled")
+
+    # ── tree ───────────────────────────────────────────────────────────────────
+
+    def _refresh_tree(self):
+        for iid in self._tree.get_children():
+            self._tree.delete(iid)
+        for rule in self._store.rules:
+            self._tree.insert("", "end", iid=rule.id,
+                              values=self._row_values(rule),
+                              tags=(self._row_tag(rule),))
+
+    def _row_values(self, rule: TriggerRule) -> tuple:
+        return (
+            "✓" if rule.enabled else "✗",
+            rule.name,
+            rule.match_mode,
+            rule.trigger_text,
+            f"{rule.cooldown:.0f}s",
+            self._status_text(rule),
+        )
+
+    def _row_tag(self, rule: TriggerRule) -> str:
+        if not rule.enabled:
+            return "disabled"
+        if rule.running:
+            return "running"
+        return ""
+
+    def _status_text(self, rule: TriggerRule) -> str:
+        if not rule.enabled:
+            return "disabled"
+        if rule.running:
+            return "running…"
+        if rule.last_completed > 0 and not rule.can_fire():
+            remaining = rule.cooldown - (time.monotonic() - rule.last_completed)
+            return f"cooling {remaining:.0f}s"
+        return "idle"
+
+    def _poll_status(self):
+        for rule in self._store.rules:
+            if self._tree.exists(rule.id):
+                self._tree.item(rule.id,
+                                values=self._row_values(rule),
+                                tags=(self._row_tag(rule),))
+        self.after(500, self._poll_status)
+
+    # ── selection ──────────────────────────────────────────────────────────────
+
+    def _selected_rule(self) -> TriggerRule | None:
+        sel = self._tree.selection()
+        if not sel:
+            return None
+        return next((r for r in self._store.rules if r.id == sel[0]), None)
+
+    # ── actions ────────────────────────────────────────────────────────────────
+
+    def _add(self):
+        TriggerRuleDialog(self, None, self._on_saved)
+
+    def _edit(self):
+        rule = self._selected_rule()
+        if rule:
+            TriggerRuleDialog(self, rule, self._on_saved)
+
+    def _delete(self):
+        rule = self._selected_rule()
+        if not rule:
+            return
+        if messagebox.askyesno("Delete Rule", f"Delete rule {rule.name!r}?", parent=self):
+            self._store.rules.remove(rule)
+            self._store.save()
+            self._tree.delete(rule.id)
+
+    def _toggle(self):
+        rule = self._selected_rule()
+        if rule:
+            rule.enabled = not rule.enabled
+            self._store.save()
+
+    def _on_saved(self, rule: TriggerRule):
+        existing = next((r for r in self._store.rules if r.id == rule.id), None)
+        if existing:
+            self._store.rules[self._store.rules.index(existing)] = rule
+        else:
+            self._store.rules.append(rule)
+        self._store.save()
+        self._refresh_tree()
+
+
 class MainWindow(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -524,13 +817,25 @@ class MainWindow(tk.Tk):
 
         self._build_toolbar()
 
+        config_dir = Path(__file__).parent.parent / "config"
+        self._trigger_store = TriggerStore(config_dir / "triggers.json")
+
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=6, pady=(6, 0))
 
-        nb.add(OCRPanel(nb), text="  OCR Reader  ")
+        triggers_panel = TriggersPanel(nb, self._trigger_store)
+        ocr_panel = OCRPanel(nb, on_loop_result=self._on_loop_result)
+
+        nb.add(ocr_panel,       text="  OCR Reader  ")
         nb.add(RunnerPanel(nb), text="  Automation Runner  ")
+        nb.add(triggers_panel,  text="  Triggers  ")
+
+        self._trigger_store.set_log_callback(triggers_panel.append_log)
 
         self._poll_mouse()
+
+    def _on_loop_result(self, text: str):
+        self._trigger_store.evaluate(text, AutomationRunner)
 
     def _build_toolbar(self):
         self._last_json = ""
