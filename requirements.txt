@@ -11,5 +11,8 @@ pynput==1.7.7
 
 # GUI — tkinter is built into Python, no extra install needed
 
+# Image pattern matching
+opencv-python==4.10.0.84
+
 # Utilities
 numpy==1.26.4

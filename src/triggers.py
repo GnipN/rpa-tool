@@ -19,20 +19,37 @@ class TriggerRule:
     script: dict
     cooldown: float  # seconds after script completes before the rule can fire again
     enabled: bool
+    # Optional image condition — both must be set together (None = no image condition)
+    image_template_id: str | None = field(default=None)
+    image_condition: str = field(default="found")  # "found" | "not found"
     # Runtime state — not persisted
     running: bool = field(default=False, repr=False)
     last_completed: float = field(default=0.0, repr=False)
 
-    def matches(self, text: str) -> bool:
+    def matches(self, text: str, image_status: dict[str, bool] | None = None) -> bool:
+        # Text condition
         if self.match_mode == "exact":
-            return self.trigger_text.strip() == text.strip()
+            text_ok = self.trigger_text.strip() == text.strip()
         elif self.match_mode == "regex":
             try:
-                return bool(re.search(self.trigger_text, text, re.IGNORECASE))
+                text_ok = bool(re.search(self.trigger_text, text, re.IGNORECASE))
             except re.error:
-                return False
+                text_ok = False
         else:  # contains
-            return self.trigger_text.lower() in text.lower()
+            text_ok = self.trigger_text.lower() in text.lower()
+
+        if not text_ok:
+            return False
+
+        # Image condition (optional) — if no scan data yet, condition fails rather than
+        # triggering spuriously on first read.
+        if self.image_template_id is not None:
+            if image_status is None or self.image_template_id not in image_status:
+                return False
+            found = image_status[self.image_template_id]
+            return found if self.image_condition == "found" else not found
+
+        return True
 
     def can_fire(self) -> bool:
         """True when enabled, not currently running, and cooldown since last completion has elapsed."""
@@ -41,7 +58,7 @@ class TriggerRule:
         return time.monotonic() - self.last_completed >= self.cooldown
 
     def to_dict(self) -> dict:
-        return {
+        d: dict = {
             "id": self.id,
             "name": self.name,
             "trigger_text": self.trigger_text,
@@ -50,6 +67,10 @@ class TriggerRule:
             "cooldown": self.cooldown,
             "enabled": self.enabled,
         }
+        if self.image_template_id is not None:
+            d["image_template_id"] = self.image_template_id
+            d["image_condition"] = self.image_condition
+        return d
 
     @classmethod
     def from_dict(cls, d: dict) -> "TriggerRule":
@@ -61,6 +82,8 @@ class TriggerRule:
             script=d["script"],
             cooldown=float(d.get("cooldown", 0)),
             enabled=bool(d.get("enabled", True)),
+            image_template_id=d.get("image_template_id"),
+            image_condition=d.get("image_condition", "found"),
         )
 
 
@@ -99,10 +122,11 @@ class TriggerStore:
 
     # ── evaluation ─────────────────────────────────────────────────────────────
 
-    def evaluate(self, ocr_text: str, runner_factory: Callable) -> None:
-        """Check all enabled rules against ocr_text and fire any that match and can fire."""
+    def evaluate(self, ocr_text: str, runner_factory: Callable,
+                 image_status: dict[str, bool] | None = None) -> None:
+        """Check all enabled rules against ocr_text (and image_status if set) and fire matches."""
         for rule in self.rules:
-            if rule.matches(ocr_text) and rule.can_fire():
+            if rule.matches(ocr_text, image_status) and rule.can_fire():
                 self._fire(rule, runner_factory)
 
     def _fire(self, rule: TriggerRule, runner_factory: Callable) -> None:

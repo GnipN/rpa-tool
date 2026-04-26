@@ -34,3 +34,10 @@
 - [x] Add Triggers tab — rule manager (treeview), Add/Edit/Delete/Toggle, trigger log, rule persistence
 - [x] Add TriggerRuleDialog — name, trigger text, match mode, cooldown, script editor with Examples picker
 - [x] Wire OCR loop → TriggerStore.evaluate on each read; cooldown blocks re-fire until script completes
+
+## Image Pattern Matching
+- [x] Create src/image_matcher.py — ImageTemplate dataclass, MatchResult dataclass, ImageMatcher (cv2.matchTemplate + NMS), TemplateStore with JSON persistence
+- [x] Add opencv-python to requirements.txt
+- [x] Add Image Patterns tab to GUI — Add/Remove/Edit templates, treeview with last match result column, scan log
+- [x] Persist template image paths + threshold to config/image_templates.json; reload on startup
+- [x] Wire OCR completion (single read and loop) to trigger fullscreen image pattern scan; update treeview results

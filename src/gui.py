@@ -9,10 +9,12 @@ from pathlib import Path
 from datetime import datetime
 import pyautogui
 
+from PIL import Image
 from .capture import ScreenCapture, Region
 from .ocr import OCREngine
 from .runner import AutomationRunner
 from .triggers import TriggerRule, TriggerStore
+from .image_matcher import ImageMatcher, ImageTemplate, MatchResult, TemplateStore
 
 
 class RegionSelector(tk.Toplevel):
@@ -62,7 +64,7 @@ class RegionSelector(tk.Toplevel):
 
 
 class OCRPanel(ttk.Frame):
-    def __init__(self, master, on_loop_result=None):
+    def __init__(self, master, on_loop_result=None, on_capture_complete=None):
         super().__init__(master, padding=8)
         self._capture = ScreenCapture()  # stateless; new mss ctx per call
         self._ocr = OCREngine()
@@ -72,6 +74,7 @@ class OCRPanel(ttk.Frame):
         self._loop_after_id = None
         self._loop_history: list[tuple[str, str]] = []
         self._on_loop_result = on_loop_result
+        self._on_capture_complete = on_capture_complete
         self._build_ui()
 
     def _build_ui(self):
@@ -189,17 +192,19 @@ class OCRPanel(ttk.Frame):
         self._interval_spin.config(state="normal")
 
     def _do_capture(self):
+        region = self._region  # snapshot so it can't change mid-capture
         def worker():
+            region_img = None
             try:
-                img = self._capture.capture_region(self._region)
-                text = self._ocr.read_text(img)
+                region_img = self._capture.capture_region(region)
+                text = self._ocr.read_text(region_img)
                 result = text or "(no text detected)"
             except Exception as exc:
                 result = f"[error] {exc}"
-            self.after(0, lambda: self._show_result(result))
+            self.after(0, lambda t=result, ri=region_img: self._show_result(t, ri, region))
         threading.Thread(target=worker, daemon=True).start()
 
-    def _show_result(self, text):
+    def _show_result(self, text, region_img=None, region=None):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self._reading = False
 
@@ -210,6 +215,8 @@ class OCRPanel(ttk.Frame):
             self._redraw_loop_output()
             if self._on_loop_result:
                 self._on_loop_result(text)
+            if self._on_capture_complete and region_img is not None and region is not None:
+                self._on_capture_complete(region_img, region.x, region.y)
             try:
                 interval_ms = max(100, int(float(self._interval_var.get()) * 1000))
             except ValueError:
@@ -222,6 +229,8 @@ class OCRPanel(ttk.Frame):
             self._output.insert("end", text)
             self._restore_controls()
             self._highlight()
+            if self._on_capture_complete and region_img is not None and region is not None:
+                self._on_capture_complete(region_img, region.x, region.y)
 
     def _redraw_loop_output(self):
         self._output.delete("1.0", "end")
@@ -524,15 +533,20 @@ class RunnerPanel(ttk.Frame):
 class TriggerRuleDialog(tk.Toplevel):
     """Modal dialog to create or edit a single trigger rule."""
 
-    def __init__(self, master, rule: TriggerRule | None, callback):
+    def __init__(self, master, rule: TriggerRule | None, callback,
+                 template_store: TemplateStore | None = None):
         super().__init__(master)
         self.title("Edit Rule" if rule else "Add Rule")
-        self.geometry("660x560")
-        self.minsize(520, 460)
+        self.geometry("660x660")
+        self.minsize(520, 540)
         self.resizable(True, True)
         self.grab_set()
         self._rule = rule
         self._callback = callback
+        # Build [(display_name, id_or_None), ...] for the image template picker
+        self._tmpl_opts: list[tuple[str, str | None]] = [("(none)", None)]
+        if template_store:
+            self._tmpl_opts += [(t.name, t.id) for t in template_store.templates]
         self._build_ui()
         if rule:
             self._populate(rule)
@@ -573,6 +587,32 @@ class TriggerRuleDialog(tk.Toplevel):
         self._enabled_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(row, text="Enabled", variable=self._enabled_var).pack(side="left")
 
+        # ── Image condition ────────────────────────────────────────────────────
+        img_frame = ttk.LabelFrame(form, text="Image Condition (optional)", padding=(8, 4))
+        img_frame.pack(fill="x", pady=(6, 0))
+
+        row = ttk.Frame(img_frame)
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text="Template:", width=16, anchor="w").pack(side="left")
+        self._img_tmpl_var = tk.StringVar(value="(none)")
+        tmpl_names = [name for name, _ in self._tmpl_opts]
+        self._img_tmpl_cb = ttk.Combobox(row, textvariable=self._img_tmpl_var,
+                                          values=tmpl_names, state="readonly", width=26)
+        self._img_tmpl_cb.pack(side="left")
+        self._img_tmpl_cb.bind("<<ComboboxSelected>>", self._on_img_tmpl_changed)
+
+        row = ttk.Frame(img_frame)
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text="Condition:", width=16, anchor="w").pack(side="left")
+        self._img_cond_var = tk.StringVar(value="found")
+        self._img_cond_cb = ttk.Combobox(row, textvariable=self._img_cond_var,
+                                          values=["found", "not found"],
+                                          state="disabled", width=12)
+        self._img_cond_cb.pack(side="left")
+        ttk.Label(row, text="  (evaluated on each OCR read alongside text condition)").pack(
+            side="left", padx=(4, 0))
+
+        # ── Script editor ──────────────────────────────────────────────────────
         script_frame = ttk.LabelFrame(form, text="Script (JSON)", padding=4)
         script_frame.pack(fill="both", expand=True, pady=(8, 0))
 
@@ -582,13 +622,21 @@ class TriggerRuleDialog(tk.Toplevel):
         ttk.Button(btn_row, text="Pick Example…", command=self._pick_example).pack(side="left")
 
         self._script_editor = scrolledtext.ScrolledText(script_frame, wrap="none",
-                                                        font=("Consolas", 9), height=12)
+                                                        font=("Consolas", 9), height=10)
         self._script_editor.pack(fill="both", expand=True)
 
         btn_row = ttk.Frame(self)
         btn_row.pack(fill="x", padx=10, pady=(0, 10))
         ttk.Button(btn_row, text="OK", command=self._ok, width=10).pack(side="left")
         ttk.Button(btn_row, text="Cancel", command=self.destroy, width=10).pack(side="right")
+
+    def _on_img_tmpl_changed(self, _=None):
+        has_tmpl = self._selected_img_template_id() is not None
+        self._img_cond_cb.config(state="readonly" if has_tmpl else "disabled")
+
+    def _selected_img_template_id(self) -> str | None:
+        name = self._img_tmpl_var.get()
+        return next((tid for n, tid in self._tmpl_opts if n == name), None)
 
     def _populate(self, rule: TriggerRule):
         self._name_var.set(rule.name)
@@ -598,6 +646,13 @@ class TriggerRuleDialog(tk.Toplevel):
         self._enabled_var.set(rule.enabled)
         self._script_editor.delete("1.0", "end")
         self._script_editor.insert("end", json.dumps(rule.script, indent=2))
+        # Image condition
+        if rule.image_template_id:
+            matched = next((n for n, tid in self._tmpl_opts if tid == rule.image_template_id), None)
+            if matched:
+                self._img_tmpl_var.set(matched)
+                self._img_cond_var.set(rule.image_condition)
+                self._img_cond_cb.config(state="readonly")
 
     def _load_file(self):
         path = filedialog.askopenfilename(title="Open Script",
@@ -631,6 +686,7 @@ class TriggerRuleDialog(tk.Toplevel):
         except ValueError:
             cooldown = 0.0
 
+        img_tmpl_id = self._selected_img_template_id()
         rule = TriggerRule(
             id=self._rule.id if self._rule else str(uuid.uuid4()),
             name=name,
@@ -639,6 +695,8 @@ class TriggerRuleDialog(tk.Toplevel):
             script=script,
             cooldown=cooldown,
             enabled=self._enabled_var.get(),
+            image_template_id=img_tmpl_id,
+            image_condition=self._img_cond_var.get() if img_tmpl_id else "found",
         )
         # Preserve runtime state when editing
         if self._rule:
@@ -649,9 +707,10 @@ class TriggerRuleDialog(tk.Toplevel):
 
 
 class TriggersPanel(ttk.Frame):
-    def __init__(self, master, store: TriggerStore):
+    def __init__(self, master, store: TriggerStore, template_store: TemplateStore | None = None):
         super().__init__(master, padding=8)
         self._store = store
+        self._template_store = template_store
         self._build_ui()
         self._refresh_tree()
         self._poll_status()
@@ -670,21 +729,23 @@ class TriggersPanel(ttk.Frame):
         pane.pack(fill="both", expand=True)
 
         tree_frame = ttk.LabelFrame(pane, text="Rules", padding=4)
-        cols = ("enabled", "name", "match", "text", "cooldown", "status")
+        cols = ("enabled", "name", "match", "text", "image", "cooldown", "status")
         self._tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
                                   selectmode="browse", height=8)
-        self._tree.heading("enabled", text="On")
-        self._tree.heading("name", text="Name")
-        self._tree.heading("match", text="Match")
-        self._tree.heading("text", text="Trigger Text")
+        self._tree.heading("enabled",  text="On")
+        self._tree.heading("name",     text="Name")
+        self._tree.heading("match",    text="Match")
+        self._tree.heading("text",     text="Trigger Text")
+        self._tree.heading("image",    text="Image")
         self._tree.heading("cooldown", text="Cooldown")
-        self._tree.heading("status", text="Status")
+        self._tree.heading("status",   text="Status")
         self._tree.column("enabled",   width=35,  anchor="center", stretch=False)
-        self._tree.column("name",      width=160)
-        self._tree.column("match",     width=80,  anchor="center", stretch=False)
-        self._tree.column("text",      width=220)
-        self._tree.column("cooldown",  width=75,  anchor="center", stretch=False)
-        self._tree.column("status",    width=115, anchor="center", stretch=False)
+        self._tree.column("name",      width=140)
+        self._tree.column("match",     width=75,  anchor="center", stretch=False)
+        self._tree.column("text",      width=175)
+        self._tree.column("image",     width=80,  anchor="center", stretch=False)
+        self._tree.column("cooldown",  width=70,  anchor="center", stretch=False)
+        self._tree.column("status",    width=110, anchor="center", stretch=False)
         self._tree.tag_configure("disabled", foreground="#999999")
         self._tree.tag_configure("running",  background="#fff3cd")
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
@@ -731,11 +792,16 @@ class TriggersPanel(ttk.Frame):
                               tags=(self._row_tag(rule),))
 
     def _row_values(self, rule: TriggerRule) -> tuple:
+        if rule.image_template_id:
+            img_str = "✓ img" if rule.image_condition == "found" else "✗ img"
+        else:
+            img_str = "—"
         return (
             "✓" if rule.enabled else "✗",
             rule.name,
             rule.match_mode,
             rule.trigger_text,
+            img_str,
             f"{rule.cooldown:.0f}s",
             self._status_text(rule),
         )
@@ -776,12 +842,12 @@ class TriggersPanel(ttk.Frame):
     # ── actions ────────────────────────────────────────────────────────────────
 
     def _add(self):
-        TriggerRuleDialog(self, None, self._on_saved)
+        TriggerRuleDialog(self, None, self._on_saved, self._template_store)
 
     def _edit(self):
         rule = self._selected_rule()
         if rule:
-            TriggerRuleDialog(self, rule, self._on_saved)
+            TriggerRuleDialog(self, rule, self._on_saved, self._template_store)
 
     def _delete(self):
         rule = self._selected_rule()
@@ -808,6 +874,305 @@ class TriggersPanel(ttk.Frame):
         self._refresh_tree()
 
 
+class EditTemplateDialog(tk.Toplevel):
+    """Modal dialog to edit an ImageTemplate's name and match threshold."""
+
+    def __init__(self, master, template: ImageTemplate, callback):
+        super().__init__(master)
+        self.title("Edit Template")
+        self.geometry("360x185")
+        self.resizable(False, False)
+        self.grab_set()
+        self._template = template
+        self._callback = callback
+        self._build_ui()
+
+    def _build_ui(self):
+        form = ttk.Frame(self, padding=10)
+        form.pack(fill="both", expand=True)
+
+        row = ttk.Frame(form)
+        row.pack(fill="x", pady=4)
+        ttk.Label(row, text="Name:", width=12, anchor="w").pack(side="left")
+        self._name_var = tk.StringVar(value=self._template.name)
+        ttk.Entry(row, textvariable=self._name_var).pack(side="left", fill="x", expand=True)
+
+        row = ttk.Frame(form)
+        row.pack(fill="x", pady=4)
+        ttk.Label(row, text="Threshold:", width=12, anchor="w").pack(side="left")
+        self._thresh_var = tk.StringVar(value=f"{self._template.threshold:.2f}")
+        ttk.Spinbox(row, from_=0.50, to=1.00, increment=0.05, format="%.2f",
+                    textvariable=self._thresh_var, width=8).pack(side="left")
+        ttk.Label(row, text="  (0.50 – 1.00)").pack(side="left")
+
+        row = ttk.Frame(form)
+        row.pack(fill="x", pady=4)
+        ttk.Label(row, text="Match mode:", width=12, anchor="w").pack(side="left")
+        self._mode_var = tk.StringVar(value=self._template.match_mode)
+        ttk.Combobox(row, textvariable=self._mode_var,
+                     values=["color", "grayscale"],
+                     state="readonly", width=12).pack(side="left")
+
+        btn_row = ttk.Frame(self)
+        btn_row.pack(fill="x", padx=10, pady=(0, 10))
+        ttk.Button(btn_row, text="OK", command=self._ok, width=10).pack(side="left")
+        ttk.Button(btn_row, text="Cancel", command=self.destroy, width=10).pack(side="right")
+
+    def _ok(self):
+        name = self._name_var.get().strip()
+        if not name:
+            messagebox.showerror("Validation", "Name is required.", parent=self)
+            return
+        try:
+            threshold = max(0.50, min(1.00, float(self._thresh_var.get())))
+        except ValueError:
+            threshold = 0.8
+        self._template.name = name
+        self._template.threshold = threshold
+        self._template.match_mode = self._mode_var.get()
+        self._callback(self._template)
+        self.destroy()
+
+
+class ImagePatternPanel(ttk.Frame):
+    """Tab for managing template images and viewing per-template match results."""
+
+    def __init__(self, master, store: TemplateStore):
+        super().__init__(master, padding=8)
+        self._store = store
+        self._matcher = ImageMatcher()
+        self._last_results: dict[str, str] = {}
+        self._match_status: dict[str, bool] = {}  # template_id → found (True/False)
+        self._log_history: list[str] = []  # newest first, capped at 25
+        self._build_ui()
+        self._refresh_tree()
+
+    def _build_ui(self):
+        toolbar = ttk.Frame(self)
+        toolbar.pack(fill="x", pady=(0, 4))
+        ttk.Button(toolbar, text="Add Image…", command=self._add).pack(side="left", padx=(0, 2))
+        ttk.Button(toolbar, text="Remove", command=self._remove).pack(side="left", padx=2)
+        ttk.Button(toolbar, text="Edit", command=self._edit).pack(side="left", padx=2)
+        ttk.Separator(toolbar, orient="vertical").pack(side="left", fill="y", padx=8)
+        ttk.Button(toolbar, text="Scan Now", command=self._scan_now).pack(side="left")
+
+        pane = ttk.PanedWindow(self, orient="vertical")
+        pane.pack(fill="both", expand=True)
+
+        tree_frame = ttk.LabelFrame(pane, text="Templates", padding=4)
+        cols = ("name", "mode", "threshold", "result")
+        self._tree = ttk.Treeview(tree_frame, columns=cols, show="headings",
+                                  selectmode="browse", height=8)
+        self._tree.heading("name",      text="Name")
+        self._tree.heading("mode",      text="Mode")
+        self._tree.heading("threshold", text="Threshold")
+        self._tree.heading("result",    text="Last Match")
+        self._tree.column("name",      width=180)
+        self._tree.column("mode",      width=80,  anchor="center", stretch=False)
+        self._tree.column("threshold", width=80,  anchor="center", stretch=False)
+        self._tree.column("result",    width=320)
+        self._tree.tag_configure("missing", foreground="#cc0000")
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side="right", fill="y")
+        self._tree.pack(fill="both", expand=True)
+        self._tree.bind("<Double-1>", lambda _: self._edit())
+        self._tree.bind("<<TreeviewSelect>>", self._on_select)
+        pane.add(tree_frame, weight=2)
+
+        self._path_var = tk.StringVar(value="")
+        ttk.Label(self, textvariable=self._path_var, font=("Consolas", 8),
+                  anchor="w", foreground="#666666").pack(fill="x", pady=(2, 0))
+
+        log_frame = ttk.LabelFrame(pane, text="Scan Log", padding=4)
+        log_tb = ttk.Frame(log_frame)
+        log_tb.pack(fill="x", pady=(0, 4))
+        ttk.Button(log_tb, text="Clear", command=self._clear_log).pack(side="right")
+        self._log = scrolledtext.ScrolledText(log_frame, wrap="word", font=("Consolas", 9),
+                                              state="disabled", height=8)
+        self._log.pack(fill="both", expand=True)
+        pane.add(log_frame, weight=1)
+
+    def _on_select(self, _=None):
+        tmpl = self._selected_template()
+        self._path_var.set(f"Path: {tmpl.path}" if tmpl else "")
+
+    def _refresh_tree(self):
+        for iid in self._tree.get_children():
+            self._tree.delete(iid)
+        for tmpl in self._store.templates:
+            exists = Path(tmpl.path).exists()
+            result_str = self._last_results.get(tmpl.id, "—") if exists else "⚠ file missing"
+            self._tree.insert("", "end", iid=tmpl.id,
+                              values=(tmpl.name, tmpl.match_mode, f"{tmpl.threshold:.2f}", result_str),
+                              tags=("missing",) if not exists else ())
+
+    def _update_result_column(self):
+        for tmpl in self._store.templates:
+            if self._tree.exists(tmpl.id):
+                exists = Path(tmpl.path).exists()
+                result_str = self._last_results.get(tmpl.id, "—") if exists else "⚠ file missing"
+                self._tree.set(tmpl.id, "result", result_str)
+
+    # ── log ─────────────────────────────────────────────────────────────────────
+
+    def _append_log(self, msg: str):
+        self._log_history.insert(0, msg)
+        if len(self._log_history) > 25:
+            self._log_history = self._log_history[:25]
+        self._redraw_log()
+
+    def _redraw_log(self):
+        self._log.config(state="normal")
+        self._log.delete("1.0", "end")
+        for i, entry in enumerate(self._log_history):
+            if i > 0:
+                self._log.insert("end", "\n")
+            self._log.insert("end", entry)
+        self._log.see("1.0")
+        self._log.config(state="disabled")
+
+    def _clear_log(self):
+        self._log_history.clear()
+        self._log.config(state="normal")
+        self._log.delete("1.0", "end")
+        self._log.config(state="disabled")
+
+    # ── selection ────────────────────────────────────────────────────────────────
+
+    def _selected_template(self) -> ImageTemplate | None:
+        sel = self._tree.selection()
+        if not sel:
+            return None
+        return next((t for t in self._store.templates if t.id == sel[0]), None)
+
+    # ── actions ──────────────────────────────────────────────────────────────────
+
+    def _add(self):
+        paths = filedialog.askopenfilenames(
+            title="Add Template Images",
+            filetypes=[("Image Files", "*.png *.jpg *.jpeg *.bmp *.tiff *.webp"),
+                       ("All Files", "*.*")],
+        )
+        if not paths:
+            return
+        added = 0
+        for raw_path in paths:
+            path = str(Path(raw_path))
+            if any(t.path == path for t in self._store.templates):
+                continue
+            try:
+                Image.open(path).verify()
+            except Exception as exc:
+                messagebox.showerror("Invalid Image",
+                                     f"{Path(path).name}:\n{exc}", parent=self)
+                continue
+            self._store.templates.append(ImageTemplate(
+                id=str(uuid.uuid4()),
+                name=Path(path).name,
+                path=path,
+                threshold=0.8,
+            ))
+            added += 1
+        if added:
+            self._store.save()
+            self._refresh_tree()
+
+    def _remove(self):
+        tmpl = self._selected_template()
+        if not tmpl:
+            return
+        if messagebox.askyesno("Remove Template", f"Remove {tmpl.name!r}?", parent=self):
+            self._store.templates.remove(tmpl)
+            self._store.save()
+            self._tree.delete(tmpl.id)
+            self._last_results.pop(tmpl.id, None)
+            self._path_var.set("")
+
+    def _edit(self):
+        tmpl = self._selected_template()
+        if tmpl:
+            EditTemplateDialog(self, tmpl, self._on_edited)
+
+    def _on_edited(self, tmpl: ImageTemplate):
+        self._store.save()
+        self._refresh_tree()
+
+    def _scan_now(self):
+        def worker():
+            try:
+                screenshot = ScreenCapture().capture_fullscreen()
+            except Exception as exc:
+                self.after(0, lambda: self._append_log(f"[error] capture failed: {exc}"))
+                return
+            self._match_and_display(screenshot, 0, 0)
+        threading.Thread(target=worker, daemon=True).start()
+
+    # ── matching ─────────────────────────────────────────────────────────────────
+
+    def run_matching(self, img: Image.Image, offset_x: int, offset_y: int) -> None:
+        """Called from OCRPanel after each read; offset is the region's top-left screen coord."""
+        if not self._store.templates:
+            return
+        threading.Thread(target=self._match_and_display, args=(img, offset_x, offset_y),
+                         daemon=True).start()
+
+    def _match_and_display(self, img: Image.Image, offset_x: int = 0, offset_y: int = 0) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        new_results: dict[str, str] = {}
+        new_status: dict[str, bool] = {}
+        log_lines: list[str] = [f"[{ts}] Scan (region offset: {offset_x}, {offset_y})"]
+
+        for tmpl in list(self._store.templates):
+            p = Path(tmpl.path)
+            if not p.exists():
+                new_results[tmpl.id] = "⚠ file missing"
+                log_lines.append(f"  {tmpl.name}: ⚠ file not found")
+                continue
+            try:
+                tmpl_img = Image.open(p)
+                matches = self._matcher.find_template(
+                    img, tmpl_img,
+                    template_id=tmpl.id,
+                    template_name=tmpl.name,
+                    threshold=tmpl.threshold,
+                    match_mode=tmpl.match_mode,
+                )
+            except Exception as exc:
+                new_results[tmpl.id] = f"error: {exc}"
+                log_lines.append(f"  {tmpl.name}: error — {exc}")
+                continue
+
+            if matches:
+                m = matches[0]
+                # Translate match coords from region-relative to absolute screen coords
+                abs_cx = m.center_x + offset_x
+                abs_cy = m.center_y + offset_y
+                extra = f"  +{len(matches) - 1} more" if len(matches) > 1 else ""
+                new_results[tmpl.id] = f"({abs_cx}, {abs_cy})  conf={m.confidence:.2f}{extra}"
+                new_status[tmpl.id] = True
+                log_lines.append(
+                    f"  {tmpl.name}: center=({abs_cx}, {abs_cy}) conf={m.confidence:.2f}{extra}"
+                )
+            else:
+                new_results[tmpl.id] = "not found"
+                new_status[tmpl.id] = False
+                log_lines.append(f"  {tmpl.name}: not found")
+
+        log_msg = "\n".join(log_lines)
+        self.after(0, lambda nr=new_results, ns=new_status, lm=log_msg: self._on_match_done(nr, ns, lm))
+
+    def _on_match_done(self, new_results: dict[str, str], new_status: dict[str, bool], log_msg: str) -> None:
+        self._last_results.update(new_results)
+        self._match_status.update(new_status)
+        self._append_log(log_msg)
+        self._update_result_column()
+
+    def get_match_status(self) -> dict[str, bool]:
+        """Return the last known found/not-found result per template ID."""
+        return dict(self._match_status)
+
+
 class MainWindow(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -819,23 +1184,29 @@ class MainWindow(tk.Tk):
 
         config_dir = Path(__file__).parent.parent / "config"
         self._trigger_store = TriggerStore(config_dir / "triggers.json")
+        self._template_store = TemplateStore(config_dir / "image_templates.json")
 
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=6, pady=(6, 0))
 
-        triggers_panel = TriggersPanel(nb, self._trigger_store)
-        ocr_panel = OCRPanel(nb, on_loop_result=self._on_loop_result)
+        self._image_panel = ImagePatternPanel(nb, self._template_store)
+        triggers_panel = TriggersPanel(nb, self._trigger_store, self._template_store)
+        ocr_panel = OCRPanel(nb,
+                             on_loop_result=self._on_loop_result,
+                             on_capture_complete=self._image_panel.run_matching)
 
-        nb.add(ocr_panel,       text="  OCR Reader  ")
-        nb.add(RunnerPanel(nb), text="  Automation Runner  ")
-        nb.add(triggers_panel,  text="  Triggers  ")
+        nb.add(ocr_panel,            text="  OCR Reader  ")
+        nb.add(RunnerPanel(nb),      text="  Automation Runner  ")
+        nb.add(triggers_panel,       text="  Triggers  ")
+        nb.add(self._image_panel,    text="  Image Patterns  ")
 
         self._trigger_store.set_log_callback(triggers_panel.append_log)
 
         self._poll_mouse()
 
     def _on_loop_result(self, text: str):
-        self._trigger_store.evaluate(text, AutomationRunner)
+        self._trigger_store.evaluate(text, AutomationRunner,
+                                     image_status=self._image_panel.get_match_status())
 
     def _build_toolbar(self):
         self._last_json = ""
