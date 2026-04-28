@@ -1,0 +1,70 @@
+[
+  {
+    "id": "eec88d0a-5920-46d2-8a19-d3a627fa9f57",
+    "name": "hit your limit",
+    "trigger_text": "hit your limit",
+    "match_mode": "contains",
+    "script": {
+      "name": "Continue, do it for me with most appropriate option.",
+      "steps": [
+        {
+          "type": "click",
+          "x": 1191,
+          "y": 882,
+          "label": "Click Name field"
+        },
+        {
+          "type": "wait",
+          "seconds": 0.8
+        },
+        {
+          "type": "type",
+          "text": "Continue, do it for me with most appropriate option."
+        },
+        {
+          "type": "wait",
+          "seconds": 3
+        },
+        {
+          "type": "click",
+          "x": 1881,
+          "y": 931,
+          "label": "Click Name field"
+        }
+      ]
+    },
+    "cooldown": 10800.0,
+    "enabled": true
+  },
+  {
+    "id": "6170a738-7345-4375-a795-4afecec41429",
+    "name": "1 Yes",
+    "trigger_text": "",
+    "match_mode": "contains",
+    "script": {
+      "name": "1 Yes",
+      "steps": [
+        {
+          "type": "click",
+          "x": 1242,
+          "y": 795,
+          "label": "Click Name field"
+        },
+        {
+          "type": "wait",
+          "seconds": 0.8
+        },
+        {
+          "type": "click",
+          "x": 150,
+          "y": 1050,
+          "label": "Click Name field"
+        }
+      ]
+    },
+    "cooldown": 60.0,
+    "enabled": true,
+    "image_template_id": "8c25a1c1-c7fa-4f0f-8cc0-43cbafbd638d",
+    "image_condition": "found"
+  }
+]

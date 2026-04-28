@@ -3,12 +3,21 @@
     "id": "cb446a87-e2c4-4c95-ba86-afbcf38a20b8",
     "name": "claude-bt-no-input.png",
     "path": "C:\\Users\\natta\\Pictures\\claude-images\\claude-bt-no-input.png",
-    "threshold": 0.8
+    "threshold": 0.99,
+    "match_mode": "color"
   },
   {
     "id": "03751e8d-251b-457e-80f1-61becfd6c062",
     "name": "claude-bt-submit.png",
     "path": "C:\\Users\\natta\\Pictures\\claude-images\\claude-bt-submit.png",
-    "threshold": 0.8
+    "threshold": 0.95,
+    "match_mode": "color"
+  },
+  {
+    "id": "8c25a1c1-c7fa-4f0f-8cc0-43cbafbd638d",
+    "name": "claude-bt-yes.png",
+    "path": "C:\\Users\\natta\\Pictures\\claude-images\\claude-bt-yes.png",
+    "threshold": 0.95,
+    "match_mode": "color"
   }
 ]
