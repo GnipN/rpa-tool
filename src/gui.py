@@ -211,15 +211,13 @@ class OCRPanel(ttk.Frame):
 
         lines = []
         plain_parts = []
-        line_texts = []
         for group in groups:
             group.sort(key=lambda r: r.bbox[0])
             y = group[0].bbox[1] + offset_y
             texts = "  ".join(r.text for r in group)
             lines.append(f"[y={y}]  {texts}")
             plain_parts.extend(r.text for r in group)
-            line_texts.append(" ".join(r.text for r in group))
-        return "\n".join(lines), " ".join(plain_parts), line_texts
+        return "\n".join(lines), " ".join(plain_parts)
 
     def _do_capture(self):
         region = self._region  # snapshot so it can't change mid-capture
@@ -245,11 +243,10 @@ class OCRPanel(ttk.Frame):
             plain_text = error
         elif results:
             offset_y = region.y if region else 0
-            display_text, plain_text, line_texts = self._format_ocr_results(results, offset_y)
+            display_text, plain_text = self._format_ocr_results(results, offset_y)
         else:
             display_text = "(no text detected)"
             plain_text = ""
-            line_texts = []
 
         if self._loop_active:
             self._loop_history.insert(0, (ts, display_text))
@@ -257,7 +254,7 @@ class OCRPanel(ttk.Frame):
                 self._loop_history = self._loop_history[:25]
             self._redraw_loop_output()
             if self._on_loop_result:
-                self._on_loop_result(plain_text, line_texts)
+                self._on_loop_result(plain_text)
             if self._on_capture_complete and region_img is not None and region is not None:
                 self._on_capture_complete(region_img, region.x, region.y)
             try:
@@ -616,38 +613,49 @@ class TriggerRuleDialog(tk.Toplevel):
                      values=["contains", "exact", "regex"],
                      state="readonly", width=12).pack(side="left")
 
-        # ── Cooldown section ───────────────────────────────────────────────────
-        cd_frame = ttk.LabelFrame(form, text="Cooldown", padding=(8, 4))
-        cd_frame.pack(fill="x", pady=(6, 0))
+        # ── Timing section ─────────────────────────────────────────────────────
+        timing_frame = ttk.LabelFrame(form, text="Timing", padding=(8, 4))
+        timing_frame.pack(fill="x", pady=(6, 0))
 
-        row = ttk.Frame(cd_frame)
+        row = ttk.Frame(timing_frame)
         row.pack(fill="x", pady=2)
-        ttk.Label(row, text="Mode:", width=14, anchor="w").pack(side="left")
-        self._cooldown_mode_var = tk.StringVar(value="duration")
-        mode_cb = ttk.Combobox(row, textvariable=self._cooldown_mode_var,
-                               values=["duration", "until_time"],
-                               state="readonly", width=14)
-        mode_cb.pack(side="left")
-        mode_cb.bind("<<ComboboxSelected>>", self._on_cooldown_mode_changed)
+        ttk.Label(row, text="Fire after:", width=14, anchor="w").pack(side="left")
+        _now = datetime.now()
+        self._dt_year_var  = tk.StringVar(value=str(_now.year))
+        self._dt_month_var = tk.StringVar(value=f"{_now.month:02d}")
+        self._dt_day_var   = tk.StringVar(value=f"{_now.day:02d}")
+        self._dt_hour_var  = tk.StringVar(value=f"{_now.hour:02d}")
+        self._dt_min_var   = tk.StringVar(value=f"{_now.minute:02d}")
+        ttk.Spinbox(row, from_=2024, to=2099, textvariable=self._dt_year_var,
+                    width=5).pack(side="left")
+        ttk.Label(row, text="-").pack(side="left", padx=1)
+        ttk.Spinbox(row, from_=1, to=12, textvariable=self._dt_month_var,
+                    width=3, format="%02.0f").pack(side="left")
+        ttk.Label(row, text="-").pack(side="left", padx=1)
+        ttk.Spinbox(row, from_=1, to=31, textvariable=self._dt_day_var,
+                    width=3, format="%02.0f").pack(side="left")
+        ttk.Label(row, text="   ").pack(side="left")
+        ttk.Spinbox(row, from_=0, to=23, textvariable=self._dt_hour_var,
+                    width=3, format="%02.0f").pack(side="left")
+        ttk.Label(row, text=":").pack(side="left", padx=1)
+        ttk.Spinbox(row, from_=0, to=59, textvariable=self._dt_min_var,
+                    width=3, format="%02.0f").pack(side="left")
 
-        self._dur_row = ttk.Frame(cd_frame)
-        self._dur_row.pack(fill="x", pady=2)
-        ttk.Label(self._dur_row, text="Duration:", width=14, anchor="w").pack(side="left")
-        self._cooldown_var = tk.StringVar(value="0")
-        ttk.Spinbox(self._dur_row, from_=0, to=3600, increment=1,
-                    textvariable=self._cooldown_var, width=8).pack(side="left")
-        ttk.Label(self._dur_row, text="sec  (0 = fire again as soon as done)").pack(
-            side="left", padx=(6, 0))
-
-        self._until_row = ttk.Frame(cd_frame)
-        # packed/hidden dynamically by _on_cooldown_mode_changed
-        ttk.Label(self._until_row, text="Until time:", width=14, anchor="w").pack(side="left")
-        self._until_time_var = tk.StringVar()
-        ttk.Entry(self._until_row, textvariable=self._until_time_var, width=8).pack(side="left")
-        ttk.Label(self._until_row, text=" HH:MM    ").pack(side="left")
-        self._auto_detect_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(self._until_row, text="Auto-detect from matched OCR line",
-                        variable=self._auto_detect_var).pack(side="left")
+        row = ttk.Frame(timing_frame)
+        row.pack(fill="x", pady=2)
+        ttk.Label(row, text="Delay:", width=14, anchor="w").pack(side="left")
+        self._delay_h_var = tk.StringVar(value="0")
+        self._delay_m_var = tk.StringVar(value="0")
+        self._delay_s_var = tk.StringVar(value="0")
+        ttk.Spinbox(row, from_=0, to=999, textvariable=self._delay_h_var,
+                    width=4).pack(side="left")
+        ttk.Label(row, text=" h  ").pack(side="left")
+        ttk.Spinbox(row, from_=0, to=59, textvariable=self._delay_m_var,
+                    width=3).pack(side="left")
+        ttk.Label(row, text=" m  ").pack(side="left")
+        ttk.Spinbox(row, from_=0, to=59, textvariable=self._delay_s_var,
+                    width=3).pack(side="left")
+        ttk.Label(row, text=" s  (0 = fire again as soon as done)").pack(side="left")
 
         row = ttk.Frame(form)
         row.pack(fill="x", pady=3)
@@ -697,14 +705,6 @@ class TriggerRuleDialog(tk.Toplevel):
         ttk.Button(btn_row, text="OK", command=self._ok, width=10).pack(side="left")
         ttk.Button(btn_row, text="Cancel", command=self.destroy, width=10).pack(side="right")
 
-    def _on_cooldown_mode_changed(self, _=None):
-        if self._cooldown_mode_var.get() == "until_time":
-            self._dur_row.pack_forget()
-            self._until_row.pack(fill="x", pady=2)
-        else:
-            self._until_row.pack_forget()
-            self._dur_row.pack(fill="x", pady=2)
-
     def _on_img_tmpl_changed(self, _=None):
         has_tmpl = self._selected_img_template_id() is not None
         self._img_cond_cb.config(state="readonly" if has_tmpl else "disabled")
@@ -717,12 +717,21 @@ class TriggerRuleDialog(tk.Toplevel):
         self._name_var.set(rule.name)
         self._text_var.set(rule.trigger_text)
         self._mode_var.set(rule.match_mode)
-        self._cooldown_var.set(str(int(rule.cooldown)))
-        self._cooldown_mode_var.set(rule.cooldown_mode)
-        self._until_time_var.set(rule.cooldown_until_time)
-        self._auto_detect_var.set(rule.auto_detect_time)
-        self._on_cooldown_mode_changed()
         self._enabled_var.set(rule.enabled)
+        # Timing
+        if rule.target_datetime:
+            try:
+                dt = datetime.strptime(rule.target_datetime, "%Y-%m-%d %H:%M")
+                self._dt_year_var.set(str(dt.year))
+                self._dt_month_var.set(f"{dt.month:02d}")
+                self._dt_day_var.set(f"{dt.day:02d}")
+                self._dt_hour_var.set(f"{dt.hour:02d}")
+                self._dt_min_var.set(f"{dt.minute:02d}")
+            except ValueError:
+                pass
+        self._delay_h_var.set(str(rule.delay_h))
+        self._delay_m_var.set(str(rule.delay_m))
+        self._delay_s_var.set(str(rule.delay_s))
         self._script_editor.delete("1.0", "end")
         self._script_editor.insert("end", json.dumps(rule.script, indent=2))
         # Image condition
@@ -766,12 +775,22 @@ class TriggerRuleDialog(tk.Toplevel):
             messagebox.showerror("Invalid JSON", str(exc), parent=self)
             return
         try:
-            cooldown = max(0.0, float(self._cooldown_var.get()))
+            year  = int(self._dt_year_var.get())
+            month = int(self._dt_month_var.get())
+            day   = int(self._dt_day_var.get())
+            hour  = int(self._dt_hour_var.get())
+            minute = int(self._dt_min_var.get())
+            datetime(year, month, day, hour, minute)  # validate
+            target_dt = f"{year:04d}-{month:02d}-{day:02d} {hour:02d}:{minute:02d}"
+        except (ValueError, TypeError):
+            messagebox.showerror("Validation", "Invalid fire-after date/time.", parent=self)
+            return
+        try:
+            delay_h = max(0, int(self._delay_h_var.get()))
+            delay_m = max(0, min(59, int(self._delay_m_var.get())))
+            delay_s = max(0, min(59, int(self._delay_s_var.get())))
         except ValueError:
-            cooldown = 0.0
-        cooldown_mode = self._cooldown_mode_var.get()
-        until_time = self._until_time_var.get().strip()
-        auto_detect = self._auto_detect_var.get()
+            delay_h = delay_m = delay_s = 0
 
         img_tmpl_id = img_tmpl_id_check
         rule = TriggerRule(
@@ -780,19 +799,18 @@ class TriggerRuleDialog(tk.Toplevel):
             trigger_text=trigger_text,
             match_mode=self._mode_var.get(),
             script=script,
-            cooldown=cooldown,
             enabled=self._enabled_var.get(),
             image_template_id=img_tmpl_id,
             image_condition=self._img_cond_var.get() if img_tmpl_id else "found",
-            cooldown_mode=cooldown_mode,
-            cooldown_until_time=until_time,
-            auto_detect_time=auto_detect,
+            target_datetime=target_dt,
+            delay_h=delay_h,
+            delay_m=delay_m,
+            delay_s=delay_s,
         )
         # Preserve runtime state when editing
         if self._rule:
             rule.running = self._rule.running
             rule.last_completed = self._rule.last_completed
-            rule.last_fired_wall = self._rule.last_fired_wall
         self._callback(rule)
         self.destroy()
 
@@ -828,7 +846,7 @@ class TriggersPanel(ttk.Frame):
         self._tree.heading("match",    text="Match")
         self._tree.heading("text",     text="Trigger Text")
         self._tree.heading("image",    text="Image")
-        self._tree.heading("cooldown", text="Cooldown")
+        self._tree.heading("cooldown", text="Delay")
         self._tree.heading("status",   text="Status")
         self._tree.column("enabled",   width=35,  anchor="center", stretch=False)
         self._tree.column("name",      width=140)
@@ -887,22 +905,23 @@ class TriggersPanel(ttk.Frame):
             img_str = "✓ img" if rule.image_condition == "found" else "✗ img"
         else:
             img_str = "—"
-        if rule.cooldown_mode == "until_time":
-            if rule.cooldown_until_time:
-                cooldown_str = f"⏰{rule.cooldown_until_time}"
-            elif rule.auto_detect_time:
-                cooldown_str = "⏰auto"
-            else:
-                cooldown_str = "⏰--:--"
+        remaining = rule.delay_remaining()
+        if remaining > 0:
+            rh = int(remaining // 3600)
+            rm = int((remaining % 3600) // 60)
+            rs = int(remaining % 60)
+            delay_str = f"⏱{rh}:{rm:02d}:{rs:02d}"
+        elif rule.delay_total_s > 0:
+            delay_str = f"{rule.delay_h}:{rule.delay_m:02d}:{rule.delay_s:02d}"
         else:
-            cooldown_str = f"{rule.cooldown:.0f}s"
+            delay_str = "—"
         return (
             "✓" if rule.enabled else "✗",
             rule.name,
             rule.match_mode,
             rule.trigger_text,
             img_str,
-            cooldown_str,
+            delay_str,
             self._status_text(rule),
         )
 
@@ -918,10 +937,16 @@ class TriggersPanel(ttk.Frame):
             return "disabled"
         if rule.running:
             return "running…"
-        if rule.last_completed > 0 and not rule.can_fire():
-            remaining = rule.cooldown - (time.monotonic() - rule.last_completed)
-            return f"cooling {remaining:.0f}s"
-        return "idle"
+        if rule.delay_remaining() > 0:
+            return "counting down"
+        if rule.target_datetime:
+            try:
+                target = datetime.strptime(rule.target_datetime, "%Y-%m-%d %H:%M")
+                if datetime.now() < target:
+                    return f"wait {rule.target_datetime[5:]}"
+            except ValueError:
+                pass
+        return "ready"
 
     def _poll_status(self):
         for rule in self._store.rules:
@@ -929,7 +954,7 @@ class TriggersPanel(ttk.Frame):
                 self._tree.item(rule.id,
                                 values=self._row_values(rule),
                                 tags=(self._row_tag(rule),))
-        self.after(500, self._poll_status)
+        self.after(1000, self._poll_status)
 
     # ── selection ──────────────────────────────────────────────────────────────
 
@@ -1304,10 +1329,9 @@ class MainWindow(tk.Tk):
 
         self._poll_mouse()
 
-    def _on_loop_result(self, text: str, ocr_lines: list[str] | None = None):
+    def _on_loop_result(self, text: str):
         self._trigger_store.evaluate(text, AutomationRunner,
-                                     image_status=self._image_panel.get_match_status(),
-                                     ocr_lines=ocr_lines)
+                                     image_status=self._image_panel.get_match_status())
 
     def _build_toolbar(self):
         self._last_json = ""

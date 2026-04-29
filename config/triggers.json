@@ -11,7 +11,7 @@
           "type": "click",
           "x": 1191,
           "y": 882,
-          "label": "Click Name field"
+          "label": "Click prompt field"
         },
         {
           "type": "wait",
@@ -29,12 +29,15 @@
           "type": "click",
           "x": 1881,
           "y": 931,
-          "label": "Click Name field"
+          "label": "Click submit button"
         }
       ]
     },
-    "cooldown": 10800.0,
-    "enabled": true
+    "enabled": true,
+    "target_datetime": "2026-04-28 04:50",
+    "delay_h": 5,
+    "delay_m": 5,
+    "delay_s": 0
   },
   {
     "id": "6170a738-7345-4375-a795-4afecec41429",
@@ -48,7 +51,7 @@
           "type": "click",
           "x": 1242,
           "y": 795,
-          "label": "Click Name field"
+          "label": "Click Yes button"
         },
         {
           "type": "wait",
@@ -56,14 +59,17 @@
         },
         {
           "type": "click",
-          "x": 150,
+          "x": 275,
           "y": 1050,
-          "label": "Click Name field"
+          "label": "Click tasks bar"
         }
       ]
     },
-    "cooldown": 60.0,
     "enabled": true,
+    "target_datetime": "2026-04-28 23:47",
+    "delay_h": 0,
+    "delay_m": 0,
+    "delay_s": 30,
     "image_template_id": "8c25a1c1-c7fa-4f0f-8cc0-43cbafbd638d",
     "image_condition": "found"
   }
