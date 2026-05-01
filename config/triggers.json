@@ -34,9 +34,9 @@
       ]
     },
     "enabled": true,
-    "target_datetime": "2026-04-28 04:50",
+    "target_datetime": "2026-05-01 03:44",
     "delay_h": 5,
-    "delay_m": 5,
+    "delay_m": 15,
     "delay_s": 0
   },
   {

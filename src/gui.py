@@ -64,7 +64,8 @@ class RegionSelector(tk.Toplevel):
 
 
 class OCRPanel(ttk.Frame):
-    def __init__(self, master, on_loop_result=None, on_capture_complete=None):
+    def __init__(self, master, on_loop_result=None, on_capture_complete=None,
+                 region_path: Path | None = None):
         super().__init__(master, padding=8)
         self._capture = ScreenCapture()  # stateless; new mss ctx per call
         self._ocr = OCREngine()
@@ -75,7 +76,9 @@ class OCRPanel(ttk.Frame):
         self._loop_history: list[tuple[str, str]] = []
         self._on_loop_result = on_loop_result
         self._on_capture_complete = on_capture_complete
+        self._region_path = region_path
         self._build_ui()
+        self._load_region()
 
     def _build_ui(self):
         # Row 1: region selector
@@ -130,6 +133,33 @@ class OCRPanel(ttk.Frame):
         self._region_var.set(f"Region: ({x}, {y})  {w}×{h}")
         self._read_btn.config(state="normal")
         self._start_loop_btn.config(state="normal")
+        self._save_region()
+
+    def _save_region(self):
+        if self._region_path is None or self._region is None:
+            return
+        try:
+            r = self._region
+            self._region_path.parent.mkdir(parents=True, exist_ok=True)
+            self._region_path.write_text(
+                json.dumps({"x": r.x, "y": r.y, "w": r.w, "h": r.h}),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _load_region(self):
+        if self._region_path is None or not self._region_path.exists():
+            return
+        try:
+            d = json.loads(self._region_path.read_text(encoding="utf-8"))
+            x, y, w, h = int(d["x"]), int(d["y"]), int(d["w"]), int(d["h"])
+            self._region = Region(x, y, w, h)
+            self._region_var.set(f"Region: ({x}, {y})  {w}×{h}")
+            self._read_btn.config(state="normal")
+            self._start_loop_btn.config(state="normal")
+        except Exception:
+            pass
 
     def _highlight(self):
         self._output.tag_remove("match", "1.0", "end")
@@ -1318,7 +1348,8 @@ class MainWindow(tk.Tk):
         triggers_panel = TriggersPanel(nb, self._trigger_store, self._template_store)
         ocr_panel = OCRPanel(nb,
                              on_loop_result=self._on_loop_result,
-                             on_capture_complete=self._image_panel.run_matching)
+                             on_capture_complete=self._image_panel.run_matching,
+                             region_path=config_dir / "ocr_region.json")
 
         nb.add(ocr_panel,            text="  OCR Reader  ")
         nb.add(RunnerPanel(nb),      text="  Automation Runner  ")
