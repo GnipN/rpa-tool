@@ -17,6 +17,34 @@ from .triggers import TriggerRule, TriggerStore
 from .image_matcher import ImageMatcher, ImageTemplate, MatchResult, TemplateStore
 
 
+_REGION_COUNT = 3
+
+
+def _format_ocr_results(results, offset_y: int, y_tolerance: int = 10):
+    """Group OCR results on the same visual line (within y_tolerance px), sort each group by X."""
+    sorted_r = sorted(results, key=lambda r: (r.bbox[1], r.bbox[0]))
+    groups: list[list] = []
+    baseline_y = None
+    current: list = []
+    for r in sorted_r:
+        if baseline_y is None or abs(r.bbox[1] - baseline_y) > y_tolerance:
+            if current:
+                groups.append(current)
+            current = [r]
+            baseline_y = r.bbox[1]
+        else:
+            current.append(r)
+    if current:
+        groups.append(current)
+    lines, plain_parts = [], []
+    for group in groups:
+        group.sort(key=lambda r: r.bbox[0])
+        y = group[0].bbox[1] + offset_y
+        lines.append(f"[y={y}]  {'  '.join(r.text for r in group)}")
+        plain_parts.extend(r.text for r in group)
+    return "\n".join(lines), " ".join(plain_parts)
+
+
 class RegionSelector(tk.Toplevel):
     """Fullscreen transparent overlay for drawing a capture region."""
 
@@ -142,7 +170,7 @@ class OCRPanel(ttk.Frame):
             r = self._region
             self._region_path.parent.mkdir(parents=True, exist_ok=True)
             self._region_path.write_text(
-                json.dumps({"x": r.x, "y": r.y, "w": r.w, "h": r.h}),
+                json.dumps({"x": r.x, "y": r.y, "width": r.width, "height": r.height}),
                 encoding="utf-8",
             )
         except Exception:
@@ -153,7 +181,7 @@ class OCRPanel(ttk.Frame):
             return
         try:
             d = json.loads(self._region_path.read_text(encoding="utf-8"))
-            x, y, w, h = int(d["x"]), int(d["y"]), int(d["w"]), int(d["h"])
+            x, y, w, h = int(d["x"]), int(d["y"]), int(d["width"]), int(d["height"])
             self._region = Region(x, y, w, h)
             self._region_var.set(f"Region: ({x}, {y})  {w}×{h}")
             self._read_btn.config(state="normal")
@@ -221,34 +249,6 @@ class OCRPanel(ttk.Frame):
         self._read_btn.config(state="normal")
         self._interval_spin.config(state="normal")
 
-    @staticmethod
-    def _format_ocr_results(results, offset_y: int, y_tolerance: int = 10):
-        """Group results on the same visual line (Y within tolerance), sort by X within each group."""
-        sorted_r = sorted(results, key=lambda r: (r.bbox[1], r.bbox[0]))
-        groups: list[list] = []
-        baseline_y = None
-        current: list = []
-        for r in sorted_r:
-            if baseline_y is None or abs(r.bbox[1] - baseline_y) > y_tolerance:
-                if current:
-                    groups.append(current)
-                current = [r]
-                baseline_y = r.bbox[1]
-            else:
-                current.append(r)
-        if current:
-            groups.append(current)
-
-        lines = []
-        plain_parts = []
-        for group in groups:
-            group.sort(key=lambda r: r.bbox[0])
-            y = group[0].bbox[1] + offset_y
-            texts = "  ".join(r.text for r in group)
-            lines.append(f"[y={y}]  {texts}")
-            plain_parts.extend(r.text for r in group)
-        return "\n".join(lines), " ".join(plain_parts)
-
     def _do_capture(self):
         region = self._region  # snapshot so it can't change mid-capture
         def worker():
@@ -273,7 +273,7 @@ class OCRPanel(ttk.Frame):
             plain_text = error
         elif results:
             offset_y = region.y if region else 0
-            display_text, plain_text = self._format_ocr_results(results, offset_y)
+            display_text, plain_text = _format_ocr_results(results, offset_y)
         else:
             display_text = "(no text detected)"
             plain_text = ""
@@ -1097,7 +1097,7 @@ class ImagePatternPanel(ttk.Frame):
         self._store = store
         self._matcher = ImageMatcher()
         self._last_results: dict[str, str] = {}
-        self._match_status: dict[str, bool] = {}  # template_id → found (True/False)
+        self._match_status: dict[int, dict[str, bool]] = {}  # region_idx → {template_id: found}
         self._log_history: list[str] = []  # newest first, capped at 25
         self._build_ui()
         self._refresh_tree()
@@ -1265,18 +1265,21 @@ class ImagePatternPanel(ttk.Frame):
 
     # ── matching ─────────────────────────────────────────────────────────────────
 
-    def run_matching(self, img: Image.Image, offset_x: int, offset_y: int) -> None:
-        """Called from OCRPanel after each read; offset is the region's top-left screen coord."""
+    def run_matching(self, img: Image.Image, offset_x: int, offset_y: int,
+                     region_idx: int = 0) -> None:
+        """Called after each OCR read; offset is the region's top-left screen coord."""
         if not self._store.templates:
             return
-        threading.Thread(target=self._match_and_display, args=(img, offset_x, offset_y),
+        threading.Thread(target=self._match_and_display,
+                         args=(img, offset_x, offset_y, region_idx),
                          daemon=True).start()
 
-    def _match_and_display(self, img: Image.Image, offset_x: int = 0, offset_y: int = 0) -> None:
+    def _match_and_display(self, img: Image.Image, offset_x: int = 0, offset_y: int = 0,
+                           region_idx: int = 0) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         new_results: dict[str, str] = {}
         new_status: dict[str, bool] = {}
-        log_lines: list[str] = [f"[{ts}] Scan (region offset: {offset_x}, {offset_y})"]
+        log_lines: list[str] = [f"[{ts}] R{region_idx + 1} scan (offset: {offset_x}, {offset_y})"]
 
         for tmpl in list(self._store.templates):
             p = Path(tmpl.path)
@@ -1315,17 +1318,297 @@ class ImagePatternPanel(ttk.Frame):
                 log_lines.append(f"  {tmpl.name}: not found")
 
         log_msg = "\n".join(log_lines)
-        self.after(0, lambda nr=new_results, ns=new_status, lm=log_msg: self._on_match_done(nr, ns, lm))
+        self.after(0, lambda nr=new_results, ns=new_status, lm=log_msg, ri=region_idx:
+                   self._on_match_done(nr, ns, lm, ri))
 
-    def _on_match_done(self, new_results: dict[str, str], new_status: dict[str, bool], log_msg: str) -> None:
+    def _on_match_done(self, new_results: dict[str, str], new_status: dict[str, bool],
+                       log_msg: str, region_idx: int = 0) -> None:
         self._last_results.update(new_results)
-        self._match_status.update(new_status)
+        self._match_status[region_idx] = new_status
         self._append_log(log_msg)
         self._update_result_column()
 
-    def get_match_status(self) -> dict[str, bool]:
-        """Return the last known found/not-found result per template ID."""
-        return dict(self._match_status)
+    def get_match_status(self, region_idx: int = 0) -> dict[str, bool]:
+        """Return the last known found/not-found result per template ID for the given region."""
+        return dict(self._match_status.get(region_idx, {}))
+
+
+class MultiRegionOCRPanel(ttk.Frame):
+    """OCR Reader that cycles sequentially through up to _REGION_COUNT selected regions."""
+
+    def __init__(self, master, trigger_stores: list, image_panel,
+                 region_paths: list | None = None):
+        super().__init__(master, padding=8)
+        self._capture = ScreenCapture()
+        self._ocr = OCREngine()
+        self._trigger_stores = trigger_stores
+        self._image_panel = image_panel
+        self._region_paths = region_paths or [None] * _REGION_COUNT
+
+        self._regions: list[Region | None] = [None] * _REGION_COUNT
+        self._loop_active = False
+        self._reading = False
+        self._loop_after_id = None
+        self._loop_history: list[tuple[str, str, int]] = []  # (ts, display_text, region_idx)
+
+        self._build_ui()
+        self._load_regions()
+
+    def _build_ui(self):
+        slots_frame = ttk.LabelFrame(self, text="Regions", padding=(6, 4))
+        slots_frame.pack(fill="x", pady=(0, 4))
+        self._region_vars: list[tk.StringVar] = []
+        self._enabled_vars: list[tk.BooleanVar] = []
+        self._en_cbs: list[ttk.Checkbutton] = []
+        for i in range(_REGION_COUNT):
+            row = ttk.Frame(slots_frame)
+            row.pack(fill="x", pady=2)
+            en_var = tk.BooleanVar(value=False)
+            self._enabled_vars.append(en_var)
+            cb = ttk.Checkbutton(row, variable=en_var, state="disabled",
+                                 command=self._update_controls)
+            self._en_cbs.append(cb)
+            cb.pack(side="left", padx=(0, 4))
+            ttk.Label(row, text=f"Region {i + 1}:", width=9, anchor="w").pack(side="left")
+            rv = tk.StringVar(value="No region selected")
+            self._region_vars.append(rv)
+            ttk.Label(row, textvariable=rv, anchor="w", width=34).pack(side="left", padx=4)
+            ttk.Button(row, text="Select", width=7,
+                       command=lambda idx=i: self._pick_region(idx)).pack(side="left")
+
+        ctrl = ttk.Frame(self)
+        ctrl.pack(fill="x", pady=(0, 4))
+        ttk.Label(ctrl, text="Interval:").pack(side="left")
+        self._interval_var = tk.StringVar(value="5.0")
+        self._interval_spin = ttk.Spinbox(ctrl, from_=0.5, to=3600, increment=0.5,
+                                           textvariable=self._interval_var, width=6)
+        self._interval_spin.pack(side="left", padx=(2, 4))
+        ttk.Label(ctrl, text="s").pack(side="left", padx=(0, 10))
+        self._read_btn = ttk.Button(ctrl, text="Read Once", command=self._read_once,
+                                    state="disabled")
+        self._read_btn.pack(side="left", padx=(0, 4))
+        self._start_btn = ttk.Button(ctrl, text="Start Loop", command=self._start_loop,
+                                     state="disabled")
+        self._start_btn.pack(side="left", padx=4)
+        self._stop_btn = ttk.Button(ctrl, text="Stop Loop", command=self._stop_loop,
+                                    state="disabled")
+        self._stop_btn.pack(side="left", padx=4)
+
+        search_row = ttk.Frame(self)
+        search_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(search_row, text="Search:").pack(side="left")
+        self._search_var = tk.StringVar()
+        self._search_var.trace_add("write", lambda *_: self._highlight())
+        ttk.Entry(search_row, textvariable=self._search_var).pack(
+            side="left", padx=4, fill="x", expand=True)
+        self._match_label = ttk.Label(search_row, text="")
+        self._match_label.pack(side="left", padx=4)
+
+        self._output = scrolledtext.ScrolledText(self, wrap="word", font=("Consolas", 9),
+                                                  state="disabled")
+        self._output.pack(fill="both", expand=True)
+        self._output.tag_configure("timestamp", foreground="#888888", font=("Consolas", 8))
+        self._output.tag_configure("highlight", background="#FFFF00")
+
+    # ── region selection ──────────────────────────────────────────────────────
+
+    def _pick_region(self, idx: int):
+        self.winfo_toplevel().iconify()
+        self.after(300, lambda: RegionSelector(
+            self, lambda x, y, w, h: self._on_region(idx, x, y, w, h)))
+
+    def _on_region(self, idx: int, x: int, y: int, w: int, h: int):
+        self.winfo_toplevel().deiconify()
+        self._regions[idx] = Region(x, y, w, h)
+        self._region_vars[idx].set(f"({x}, {y})  {w}×{h}")
+        self._enabled_vars[idx].set(True)
+        self._en_cbs[idx].config(state="normal")
+        self._update_controls()
+        self._save_region(idx)
+
+    def _update_controls(self):
+        has_active = any(
+            r is not None and en.get()
+            for r, en in zip(self._regions, self._enabled_vars)
+        )
+        idle = not self._loop_active and not self._reading
+        s = "normal" if has_active and idle else "disabled"
+        self._read_btn.config(state=s)
+        self._start_btn.config(state=s)
+
+    # ── read once / loop ──────────────────────────────────────────────────────
+
+    def _read_once(self):
+        if self._reading:
+            return
+        self._reading = True
+        self._update_controls()
+        self._output.config(state="normal")
+        self._output.delete("1.0", "end")
+        self._output.insert("end", "Reading…\n")
+        self._output.config(state="disabled")
+        self._process_slot(0, one_shot=True)
+
+    def _start_loop(self):
+        if self._loop_active:
+            return
+        self._loop_active = True
+        self._reading = True
+        self._loop_history.clear()
+        self._output.config(state="normal")
+        self._output.delete("1.0", "end")
+        self._output.config(state="disabled")
+        self._update_controls()
+        self._stop_btn.config(state="normal")
+        self._interval_spin.config(state="disabled")
+        self._process_slot(0)
+
+    def _stop_loop(self):
+        self._loop_active = False
+        self._reading = False
+        if self._loop_after_id:
+            self.after_cancel(self._loop_after_id)
+            self._loop_after_id = None
+        self._stop_btn.config(state="disabled")
+        self._interval_spin.config(state="normal")
+        self._update_controls()
+
+    # ── sequential slot processing ────────────────────────────────────────────
+
+    def _process_slot(self, slot_idx: int, one_shot: bool = False):
+        while slot_idx < _REGION_COUNT:
+            if self._regions[slot_idx] is not None and self._enabled_vars[slot_idx].get():
+                break
+            slot_idx += 1
+
+        if slot_idx >= _REGION_COUNT:
+            if one_shot:
+                self._reading = False
+                self._update_controls()
+                self._highlight()
+            else:
+                try:
+                    ms = max(100, int(float(self._interval_var.get()) * 1000))
+                except ValueError:
+                    ms = 5000
+                self._loop_after_id = self.after(ms, lambda: self._process_slot(0))
+            return
+
+        region = self._regions[slot_idx]
+
+        def worker():
+            results = None
+            region_img = None
+            error = None
+            try:
+                region_img = self._capture.capture_region(region)
+                results = self._ocr.read_image(region_img)
+            except Exception as exc:
+                error = str(exc)
+            self.after(0, lambda r=results, ri=region_img, e=error:
+                       self._on_slot_done(slot_idx, r, ri, region, e, one_shot))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_slot_done(self, slot_idx, results, region_img, region, error, one_shot):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if error:
+            display_text, plain_text = f"[error] {error}", ""
+        elif results:
+            display_text, plain_text = _format_ocr_results(results, region.y)
+        else:
+            display_text, plain_text = "(no text detected)", ""
+
+        self._loop_history.insert(0, (ts, display_text, slot_idx))
+        if len(self._loop_history) > 25:
+            self._loop_history = self._loop_history[:25]
+        self._redraw_output()
+
+        if region_img is not None:
+            self._image_panel.run_matching(region_img, region.x, region.y,
+                                           region_idx=slot_idx)
+        if not one_shot:
+            status = self._image_panel.get_match_status(region_idx=slot_idx)
+            self._trigger_stores[slot_idx].evaluate(plain_text, AutomationRunner,
+                                                     image_status=status)
+
+        if one_shot or self._loop_active:
+            self._process_slot(slot_idx + 1, one_shot=one_shot)
+
+    def _redraw_output(self):
+        self._output.config(state="normal")
+        self._output.delete("1.0", "end")
+        for i, (ts, text, ridx) in enumerate(self._loop_history):
+            if i > 0:
+                self._output.insert("end", "\n")
+            self._output.insert("end", f"── {ts}  Region {ridx + 1} ──\n", "timestamp")
+            self._output.insert("end", text + "\n")
+        self._output.see("1.0")
+        self._output.config(state="disabled")
+        self._highlight()
+
+    def _highlight(self):
+        self._output.tag_remove("highlight", "1.0", "end")
+        query = self._search_var.get()
+        if not query:
+            self._match_label.config(text="")
+            return
+        content = self._output.get("1.0", "end")
+        ql, cl = query.lower(), content.lower()
+        count, start = 0, 0
+        while True:
+            pos = cl.find(ql, start)
+            if pos == -1:
+                break
+            count += 1
+            self._output.tag_add("highlight", f"1.0+{pos}c", f"1.0+{pos + len(query)}c")
+            start = pos + 1
+        self._match_label.config(
+            text=f"{count} match{'es' if count != 1 else ''}" if count else "no matches")
+
+    # ── persistence ───────────────────────────────────────────────────────────
+
+    def _save_region(self, idx: int):
+        path = self._region_paths[idx]
+        r = self._regions[idx]
+        if path is None or r is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"x": r.x, "y": r.y, "width": r.width, "height": r.height}),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _load_regions(self):
+        for idx, path in enumerate(self._region_paths):
+            if path is None or not path.exists():
+                continue
+            try:
+                d = json.loads(path.read_text(encoding="utf-8"))
+                x, y, w, h = int(d["x"]), int(d["y"]), int(d["width"]), int(d["height"])
+                self._regions[idx] = Region(x, y, w, h)
+                self._region_vars[idx].set(f"({x}, {y})  {w}×{h}")
+                self._enabled_vars[idx].set(True)
+                self._en_cbs[idx].config(state="normal")
+            except Exception:
+                pass
+        self._update_controls()
+
+
+class MultiRegionTriggersPanel(ttk.Frame):
+    """Triggers tab: one TriggersPanel sub-tab per region."""
+
+    def __init__(self, master, trigger_stores: list, template_store=None):
+        super().__init__(master)
+        nb = ttk.Notebook(self)
+        nb.pack(fill="both", expand=True)
+        for i, store in enumerate(trigger_stores):
+            panel = TriggersPanel(nb, store, template_store)
+            nb.add(panel, text=f"  Region {i + 1}  ")
+            store.set_log_callback(panel.append_log)
 
 
 class MainWindow(tk.Tk):
@@ -1338,31 +1621,39 @@ class MainWindow(tk.Tk):
         self._build_toolbar()
 
         config_dir = Path(__file__).parent.parent / "config"
-        self._trigger_store = TriggerStore(config_dir / "triggers.json")
         self._template_store = TemplateStore(config_dir / "image_templates.json")
+
+        # Migrate single-region files to region-0 slots if they exist
+        for old, new in [("triggers.json", "triggers_0.json"),
+                         ("ocr_region.json", "ocr_region_0.json")]:
+            old_p, new_p = config_dir / old, config_dir / new
+            if old_p.exists() and not new_p.exists():
+                import shutil
+                shutil.copy(old_p, new_p)
+
+        trigger_stores = [
+            TriggerStore(config_dir / f"triggers_{i}.json")
+            for i in range(_REGION_COUNT)
+        ]
 
         nb = ttk.Notebook(self)
         nb.pack(fill="both", expand=True, padx=6, pady=(6, 0))
 
         self._image_panel = ImagePatternPanel(nb, self._template_store)
-        triggers_panel = TriggersPanel(nb, self._trigger_store, self._template_store)
-        ocr_panel = OCRPanel(nb,
-                             on_loop_result=self._on_loop_result,
-                             on_capture_complete=self._image_panel.run_matching,
-                             region_path=config_dir / "ocr_region.json")
+        triggers_panel = MultiRegionTriggersPanel(nb, trigger_stores, self._template_store)
+        ocr_panel = MultiRegionOCRPanel(
+            nb,
+            trigger_stores=trigger_stores,
+            image_panel=self._image_panel,
+            region_paths=[config_dir / f"ocr_region_{i}.json" for i in range(_REGION_COUNT)],
+        )
 
-        nb.add(ocr_panel,            text="  OCR Reader  ")
-        nb.add(RunnerPanel(nb),      text="  Automation Runner  ")
-        nb.add(triggers_panel,       text="  Triggers  ")
-        nb.add(self._image_panel,    text="  Image Patterns  ")
-
-        self._trigger_store.set_log_callback(triggers_panel.append_log)
+        nb.add(ocr_panel,         text="  OCR Reader  ")
+        nb.add(RunnerPanel(nb),   text="  Automation Runner  ")
+        nb.add(triggers_panel,    text="  Triggers  ")
+        nb.add(self._image_panel, text="  Image Patterns  ")
 
         self._poll_mouse()
-
-    def _on_loop_result(self, text: str):
-        self._trigger_store.evaluate(text, AutomationRunner,
-                                     image_status=self._image_panel.get_match_status())
 
     def _build_toolbar(self):
         self._last_json = ""
